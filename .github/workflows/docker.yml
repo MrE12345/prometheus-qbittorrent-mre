@@ -28,7 +28,7 @@ jobs:
             type=pep440,prefix=v,pattern={{version}}
             type=ref,event=branch
             type=sha
-          images: ${{ github.actor }}/prometheus-qbittorrent-exporter
+          images: ${{ github.actor }}/prometheus-qbittorrent-mre
 
       - name: Login to DockerHub
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
