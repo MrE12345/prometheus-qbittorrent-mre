@@ -59,24 +59,38 @@ class QbittorrentMetricsCollector:
     def collect(self) -> Iterable[GaugeMetricFamily | CounterMetricFamily]:
         """
         Yields Prometheus metrics etter at vi har gruppert alle samples med samme
-        (name, metric_type, help_text) i én enkelt MetricFamily.
+        (name, metric_type) i én enkelt MetricFamily.
+
+        Viktig: Dersom flere Metric-objekter med samme navn men ulik help_text
+        oppstår, vil vi logge en warning og benytte help_text fra den første vi møtte.
+        Dette er nødvendig ettersom Prometheus krever at en metrikk kun har én HELP-linje.
         """
         metrics: list[Metric] = self.get_qbittorrent_metrics()
         grouped = {}
 
-        # Gruppér metrics etter (name, metric_type, help_text)
+        # Gruppér metrics etter (name, metric_type)
         for metric in metrics:
-            key = (metric.name, metric.metric_type, metric.help_text)
+            key = (metric.name, metric.metric_type)
             if key not in grouped:
-                # Lagre label-navnene. Vi forutsetter at rekkefølgen er konsistent for samme nøkkel.
-                grouped[key] = {"label_keys": list(metric.labels.keys()), "samples": []}
+                grouped[key] = {
+                    "label_keys": list(metric.labels.keys()),
+                    "samples": [],
+                    "help_text": metric.help_text,
+                }
+            else:
+                # Dersom help_text for samme metric-navn er ulik, logg en warning.
+                if grouped[key]["help_text"] != metric.help_text:
+                    logger.warning(
+                        f"Conflicting help texts for metric {metric.name}: "
+                        f"'{grouped[key]['help_text']}' vs '{metric.help_text}'. Using the first one."
+                    )
             grouped[key]["samples"].append((list(metric.labels.values()), metric.value))
 
-        for (name, metric_type, help_text), data in grouped.items():
+        for (name, metric_type), data in grouped.items():
             if metric_type == MetricType.COUNTER:
-                prom_metric = CounterMetricFamily(name, help_text, labels=data["label_keys"])
+                prom_metric = CounterMetricFamily(name, data["help_text"], labels=data["label_keys"])
             else:
-                prom_metric = GaugeMetricFamily(name, help_text, labels=data["label_keys"])
+                prom_metric = GaugeMetricFamily(name, data["help_text"], labels=data["label_keys"])
             for label_values, value in data["samples"]:
                 prom_metric.add_metric(label_values, value)
             yield prom_metric
@@ -220,8 +234,7 @@ class QbittorrentMetricsCollector:
         return [
             torrent
             for torrent in torrents
-            if torrent["category"] == category
-            or (category == "Uncategorized" and torrent["category"] == "")
+            if torrent["category"] == category or (category == "Uncategorized" and torrent["category"] == "")
         ]
 
     def _filter_torrents_by_state(self, state: TorrentStates, torrents: list[dict]) -> list[dict]:
@@ -230,6 +243,8 @@ class QbittorrentMetricsCollector:
 
     def _construct_metric(self, state: str, category: str, count: int) -> Metric:
         """Constructs and returns a metric object with a torrent count and appropriate labels."""
+        # Merk at help_text her varierer med state og category,
+        # men for groupingens skyld vil vi kombinere alle qbittorrent_torrents_count-metrics til ett.
         return Metric(
             name=f"{self.config['metrics_prefix']}_torrents_count",
             value=count,
@@ -238,7 +253,7 @@ class QbittorrentMetricsCollector:
                 "category": category,
                 "server": self.server,
             },
-            help_text=f"Number of torrents in status {state} under category {category}",
+            help_text=f"Number of torrents filtered by status and category",
         )
 
     def _get_qbittorrent_torrent_tags_metrics(self) -> list[Metric]:
@@ -253,6 +268,8 @@ class QbittorrentMetricsCollector:
             category_torrents = self._filter_torrents_by_category(category, torrents)
             for state in TorrentStates:
                 state_torrents = self._filter_torrents_by_state(state, category_torrents)
+                # Her bruker vi _construct_metric, og vi setter en fast help_text for å sikre
+                # at alle samples med samme metric-navn får samme HELP-linje.
                 metric = self._construct_metric(state.value, category, len(state_torrents))
                 metrics.append(metric)
 
