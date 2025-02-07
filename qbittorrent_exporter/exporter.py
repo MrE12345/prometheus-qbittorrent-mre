@@ -22,7 +22,6 @@ class MetricType(StrEnum):
     """
     Represents possible metric types (used in this project).
     """
-
     GAUGE = auto()
     COUNTER = auto()
 
@@ -32,7 +31,6 @@ class Metric:
     """
     Contains data and metadata about a single counter or gauge.
     """
-
     name: str
     value: Any
     labels: dict[str, str] = field(default_factory=lambda: {})
@@ -60,22 +58,27 @@ class QbittorrentMetricsCollector:
 
     def collect(self) -> Iterable[GaugeMetricFamily | CounterMetricFamily]:
         """
-        Yields Prometheus gauges and counters from metrics collected from qbittorrent.
+        Yields Prometheus metrics etter at vi har gruppert alle samples med samme
+        (name, metric_type, help_text) i én enkelt MetricFamily.
         """
         metrics: list[Metric] = self.get_qbittorrent_metrics()
+        grouped = {}
 
+        # Gruppér metrics etter (name, metric_type, help_text)
         for metric in metrics:
-            if metric.metric_type == MetricType.COUNTER:
-                prom_metric = CounterMetricFamily(
-                    metric.name, metric.help_text, labels=list(metric.labels.keys())
-                )
+            key = (metric.name, metric.metric_type, metric.help_text)
+            if key not in grouped:
+                # Lagre label-navnene. Vi forutsetter at rekkefølgen er konsistent for samme nøkkel.
+                grouped[key] = {"label_keys": list(metric.labels.keys()), "samples": []}
+            grouped[key]["samples"].append((list(metric.labels.values()), metric.value))
+
+        for (name, metric_type, help_text), data in grouped.items():
+            if metric_type == MetricType.COUNTER:
+                prom_metric = CounterMetricFamily(name, help_text, labels=data["label_keys"])
             else:
-                prom_metric = GaugeMetricFamily(
-                    metric.name, metric.help_text, labels=list(metric.labels.keys())
-                )
-            prom_metric.add_metric(
-                value=metric.value, labels=list(metric.labels.values())
-            )
+                prom_metric = GaugeMetricFamily(name, help_text, labels=data["label_keys"])
+            for label_values, value in data["samples"]:
+                prom_metric.add_metric(label_values, value)
             yield prom_metric
 
     def get_qbittorrent_metrics(self) -> list[Metric]:
@@ -86,17 +89,13 @@ class QbittorrentMetricsCollector:
         metrics.extend(self._get_qbittorrent_status_metrics())
         metrics.extend(self._get_qbittorrent_torrent_tags_metrics())
         metrics.extend(self._get_qbittorrent_by_torrent_metrics())
-
         return metrics
 
     def _get_qbittorrent_by_torrent_metrics(self) -> list[Metric]:
         if not self.config.get("export_metrics_by_torrent", False):
             return []
-
         torrents = self._fetch_torrents()
-
         metrics: list[Metric] = []
-
         for torrent in torrents:
             metrics.append(
                 Metric(
@@ -122,7 +121,6 @@ class QbittorrentMetricsCollector:
                     help_text="Downloaded data for the torrent",
                 )
             )
-
         return metrics
 
     def _get_qbittorrent_status_metrics(self) -> list[Metric]:
@@ -131,7 +129,6 @@ class QbittorrentMetricsCollector:
         """
         maindata: dict[str, Any] = {}
         version: str = ""
-
         # Fetch data from API
         try:
             maindata = self.client.sync_maindata()
@@ -147,27 +144,21 @@ class QbittorrentMetricsCollector:
                 value=bool(server_state),
                 labels={"version": version, "server": self.server},
                 help_text=(
-                    "Whether the qBittorrent server is answering requests from this"
-                    " exporter. A `version` label with the server version is added."
+                    "Whether the qBittorrent server is answering requests from this exporter. "
+                    "A `version` label with the server version is added."
                 ),
             ),
             Metric(
                 name=f"{self.config['metrics_prefix']}_connected",
                 value=server_state.get("connection_status", "") == "connected",
                 labels={"server": self.server},
-                help_text=(
-                    "Whether the qBittorrent server is connected to the Bittorrent"
-                    " network."
-                ),
+                help_text="Whether the qBittorrent server is connected to the Bittorrent network.",
             ),
             Metric(
                 name=f"{self.config['metrics_prefix']}_firewalled",
                 value=server_state.get("connection_status", "") == "firewalled",
                 labels={"server": self.server},
-                help_text=(
-                    "Whether the qBittorrent server is connected to the Bittorrent"
-                    " network but is behind a firewall."
-                ),
+                help_text="Whether the qBittorrent server is connected to the Bittorrent network but is behind a firewall.",
             ),
             Metric(
                 name=f"{self.config['metrics_prefix']}_dht_nodes",
@@ -224,9 +215,7 @@ class QbittorrentMetricsCollector:
             logger.error(f"Couldn't fetch torrents: {e}")
             return []
 
-    def _filter_torrents_by_category(
-        self, category: str, torrents: list[dict]
-    ) -> list[dict]:
+    def _filter_torrents_by_category(self, category: str, torrents: list[dict]) -> list[dict]:
         """Filters torrents by the given category."""
         return [
             torrent
@@ -235,15 +224,12 @@ class QbittorrentMetricsCollector:
             or (category == "Uncategorized" and torrent["category"] == "")
         ]
 
-    def _filter_torrents_by_state(
-        self, state: TorrentStates, torrents: list[dict]
-    ) -> list[dict]:
+    def _filter_torrents_by_state(self, state: TorrentStates, torrents: list[dict]) -> list[dict]:
         """Filters torrents by the given state."""
         return [torrent for torrent in torrents if torrent["state"] == state.value]
 
     def _construct_metric(self, state: str, category: str, count: int) -> Metric:
-        """Constructs and returns a metric object with a torrent count and appropriate
-        labels."""
+        """Constructs and returns a metric object with a torrent count and appropriate labels."""
         return Metric(
             name=f"{self.config['metrics_prefix']}_torrents_count",
             value=count,
@@ -260,17 +246,14 @@ class QbittorrentMetricsCollector:
         torrents = self._fetch_torrents()
 
         metrics: list[Metric] = []
+        # Legg til "Uncategorized" hvis den ikke finnes fra før
         categories["Uncategorized"] = {"name": "Uncategorized", "savePath": ""}
 
         for category in categories:
             category_torrents = self._filter_torrents_by_category(category, torrents)
             for state in TorrentStates:
-                state_torrents = self._filter_torrents_by_state(
-                    state, category_torrents
-                )
-                metric = self._construct_metric(
-                    state.value, category, len(state_torrents)
-                )
+                state_torrents = self._filter_torrents_by_state(state, category_torrents)
+                metric = self._construct_metric(state.value, category, len(state_torrents))
                 metrics.append(metric)
 
         return metrics
@@ -287,9 +270,9 @@ class ShutdownSignalHandler:
     def is_shutting_down(self):
         return self.shutdown_count > 0
 
-    def _on_signal_received(self, signal, frame):
+    def _on_signal_received(self, sig, frame):
         if self.shutdown_count > 1:
-            logger.warn("Forcibly killing exporter")
+            logger.warning("Forcibly killing exporter")
             sys.exit(1)
         logger.info("Exporter is shutting down")
         self.shutdown_count += 1
@@ -303,7 +286,6 @@ def _get_config_value(key: str, default: str = "") -> str:
                 return input_file.read().strip()
         except IOError as e:
             logger.error(f"Unable to read value for {key} from {input_path}: {str(e)}")
-
     return os.environ.get(key, default)
 
 
@@ -320,42 +302,33 @@ def get_config() -> dict:
         "exporter_port": int(_get_config_value("EXPORTER_PORT", "8000")),
         "log_level": _get_config_value("EXPORTER_LOG_LEVEL", "INFO"),
         "metrics_prefix": _get_config_value("METRICS_PREFIX", "qbittorrent"),
-        "export_metrics_by_torrent": (
-            _get_config_value("EXPORT_METRICS_BY_TORRENT", "False") == "True"
-        ),
-        "verify_webui_certificate": (
-            _get_config_value("VERIFY_WEBUI_CERTIFICATE", "True") == "True"
-        ),
+        "export_metrics_by_torrent": (_get_config_value("EXPORT_METRICS_BY_TORRENT", "False") == "True"),
+        "verify_webui_certificate": (_get_config_value("VERIFY_WEBUI_CERTIFICATE", "True") == "True"),
     }
 
 
 def main():
-    # Init logger so it can be used
+    # Init logger slik at den kan brukes
     logHandler = logging.StreamHandler()
     formatter = jsonlogger.JsonFormatter(
-        "%(asctime) %(levelname) %(message)", datefmt="%Y-%m-%d %H:%M:%S"
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
     logHandler.setFormatter(formatter)
     logger.addHandler(logHandler)
-    logger.setLevel("INFO")  # default until config is loaded
+    logger.setLevel("INFO")  # default til konfigurasjon lastes
 
     config = get_config()
-
-    # set level once config has been loaded
+    # Sett loggnivået etter at konfigurasjonen er lastet
     logger.setLevel(config["log_level"])
 
     # Register signal handler
     signal_handler = ShutdownSignalHandler()
 
     if not config["host"]:
-        logger.error(
-            "No host specified, please set QBITTORRENT_HOST environment variable"
-        )
+        logger.error("No host specified, please set QBITTORRENT_HOST environment variable")
         sys.exit(1)
     if not config["port"]:
-        logger.error(
-            "No port specified, please set QBITTORRENT_PORT environment variable"
-        )
+        logger.error("No port specified, please set QBITTORRENT_PORT environment variable")
         sys.exit(1)
 
     # Register our custom collector
@@ -364,9 +337,7 @@ def main():
 
     # Start server
     start_http_server(config["exporter_port"], config["exporter_address"])
-    logger.info(
-        f"Exporter listening on {config['exporter_address']}:{config['exporter_port']}"
-    )
+    logger.info(f"Exporter listening on {config['exporter_address']}:{config['exporter_port']}")
 
     while not signal_handler.is_shutting_down():
         time.sleep(1)
